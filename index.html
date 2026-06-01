@@ -1,0 +1,464 @@
+import { useState, useEffect, useRef } from "react";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const SK = "gal_visits_final";
+const PLACEMENTS  = ["Foster Home","Relative","Non-Relative","Group Home","Reunified"];
+const VISIT_TYPES = ["Scheduled","Unannounced","Initial","Follow-Up"];
+const ACADEMIC    = ["On Grade Level","Below Grade Level","Above Grade Level","Unknown","Not Applicable"];
+const QUAL        = ["Good","Fair","Poor","N/A"];
+const V_STATUS    = ["Active","Suspended","Terminated","N/A"];
+const FREQS       = ["Once Daily","Twice Daily","Three Times Daily","As Needed","Weekly","Other"];
+const TABS = [
+  {id:"core",label:"📋 Visit"},
+  {id:"medical",label:"🏥 Medical"},
+  {id:"obs",label:"👁 Observe"},
+  {id:"education",label:"🎓 School"},
+  {id:"visitation",label:"👨‍👩‍👧 Visits"},
+  {id:"gal",label:"⚖️ GAL"},
+  {id:"narrative",label:"📄 Report"},
+];
+const OBS_TERMS = {
+  behavior:["Cooperative","Compliant","Defiant","Oppositional","Impulsive","Hyperactive","Aggressive","Withdrawn","Age-appropriate","Self-regulated"],
+  mood:["Euthymic","Anxious","Depressed","Irritable","Elevated","Labile","Flat affect","Constricted affect","Cheerful","Dysthymic"],
+  interaction:["Warm and responsive","Appropriate boundaries","Seeks reassurance","Avoidant attachment","Secure attachment","Parentified","Peer-appropriate","Deferential to caregiver","Resistant to engagement","Spontaneous and playful"],
+  communication:["Articulate","Age-appropriate","Delayed expressive language","Selective mutism","Open and forthcoming","Guarded","Tangential","Concrete thinking","Non-verbal cues present","Responsive to questions"],
+  appearance:["Clean and well-groomed","Appropriately dressed","Signs of neglect","Adequate hygiene","Poor dentition","Healthy weight","Underweight","Overweight","No visible injuries","Visible bruising or marks"],
+  concerns:["Unexplained injuries","Regression in development","Signs of trauma","Food insecurity","Lack of supervision","Exposure to domestic violence","Substance use in home","Inconsistent school attendance","Medical neglect","Emotional unavailability of caregiver"],
+  strengths:["Strong caregiver bond","Resilient","Engaged in school","Positive peer relationships","Expresses emotions appropriately","Participating in therapy","Demonstrates empathy","Self-advocacy skills","Supportive extended family","Motivated and goal-oriented"],
+  sleepingArea:["Private sleeping space","Shared room — appropriate","Clean and safe","Adequate bedding","Age-appropriate","No privacy concerns","Cluttered or unsafe","Lacks appropriate bedding","Smoke or odor present","Accessible to caregiver"],
+  homeObs:["Clean and organized","Adequate food supply","Utilities functioning","Safe and hazard-free","Evidence of substance use","Overcrowded","Pet waste present","Broken fixtures","Child-proofed appropriately","Warm and nurturing atmosphere"],
+  caregiver:["Engaged and responsive","Reports no concerns","Requesting additional support","Demonstrates appropriate parenting","Expresses frustration","Financial stressors reported","Cooperative with case plan","Respite care needed","Unaware of child's therapeutic needs","Strong commitment to child's well-being"],
+  wishes:["Wants to return home","Wants to stay in current placement","Desires more sibling contact","Wants more parent visits","Expressed desire for adoption","Wants to remain with caregiver","Interested in extracurriculars","Expressed safety concerns","Wants help in school","Desires stability and permanency"],
+};
+
+// ── Storage — uses localStorage directly ─────────────────────────────────────
+function lsRead() {
+  try {
+    const raw = localStorage.getItem(SK);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e) { console.error("read failed",e); return []; }
+}
+function lsWrite(visits) {
+  try {
+    localStorage.setItem(SK, JSON.stringify(visits));
+    return true;
+  } catch(e) { console.error("write failed",e); return false; }
+}
+
+// ── Empty visit template ──────────────────────────────────────────────────────
+function newVisit() {
+  const now = new Date();
+  return {
+    id: Date.now().toString(36)+Math.random().toString(36).slice(2),
+    date: now.toISOString().split("T")[0],
+    time: now.toTimeString().slice(0,5),
+    childName:"", caseNumber:"", placementType:"Foster Home",
+    visitType:"Scheduled", visitAddress:"", peoplePresent:"",
+    lastMedDate:"", lastMedProvider:"", nextMedDate:"", nextMedProvider:"",
+    lastDentDate:"", lastDentProvider:"", nextDentDate:"", nextDentProvider:"",
+    visionNeeds:"", hasPsychMed:false, medications:[],
+    nextMedMgmtDate:"", nextMedMgmtProvider:"",
+    behavior:"", mood:"", interaction:"", communication:"",
+    appearance:"", concerns:"", strengths:"", childStatements:"",
+    sleepingArea:"", homeObs:"", caregiver:"",
+    schoolName:"", gradeLevel:"", academicProgress:"On Grade Level",
+    hasIEP:false, hasPlan504:false, servicesReceiving:"", addlNeeds:"",
+    wishes:"", wishesConfirmed:false,
+    parentStatus:"Active", parentFreq:"", parentQuality:"Good", parentConcerns:"",
+    siblingStatus:"Active", siblingNotes:"",
+    galFollowUp:"", additionalNotes:"", narrative:"",
+  };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmtDate = d => { if(!d) return "N/A"; const[y,m,day]=d.split("-"); return`${m}/${day}/${y}`; };
+const fmtTime = t => { if(!t) return ""; const[h,m]=t.split(":"); const hr=+h; return`${hr%12||12}:${m} ${hr>=12?"PM":"AM"}`; };
+
+// ── Narrative builder ─────────────────────────────────────────────────────────
+function buildNarrative(v) {
+  const name = v.childName||"[Child Name]";
+  const dash = "─".repeat(55);
+  const parts = [];
+  parts.push(`GUARDIAN AD LITEM VISIT REPORT\nCase Number: ${v.caseNumber||"[Case #]"}\n${dash}`);
+  const intro = [
+    `On ${fmtDate(v.date)}${v.time?` at ${fmtTime(v.time)}`:""}, the Guardian Ad Litem conducted a ${v.visitType.toLowerCase()} visit with ${name}${v.visitAddress?` at ${v.visitAddress}`:""}. `,
+    v.placementType?`At the time of this visit, ${name} was residing in a ${v.placementType.toLowerCase()} placement. `:"",
+    v.peoplePresent?`The following individuals were present: ${v.peoplePresent}.`:"",
+  ].filter(Boolean).join("");
+  parts.push(`VISIT OVERVIEW\n\n${intro}`);
+  const med=[];
+  if(v.lastMedDate||v.lastMedProvider) med.push(`${name}'s most recent medical appointment was on ${fmtDate(v.lastMedDate)}${v.lastMedProvider?` with ${v.lastMedProvider}`:""}. `);
+  if(v.nextMedDate||v.nextMedProvider) med.push(`A follow-up medical appointment is scheduled for ${fmtDate(v.nextMedDate)}${v.nextMedProvider?` with ${v.nextMedProvider}`:""}. `);
+  if(v.lastDentDate||v.lastDentProvider) med.push(`${name}'s last dental appointment was on ${fmtDate(v.lastDentDate)}${v.lastDentProvider?` with ${v.lastDentProvider}`:""}. `);
+  if(v.nextDentDate||v.nextDentProvider) med.push(`The next dental appointment is scheduled for ${fmtDate(v.nextDentDate)}${v.nextDentProvider?` with ${v.nextDentProvider}`:""}. `);
+  if(v.visionNeeds) med.push(`Vision needs: ${v.visionNeeds}. `);
+  if(v.hasPsychMed&&v.medications.length>0){ const ml=v.medications.map(m=>`${m.name||"unspecified"} ${m.dosage?`(${m.dosage} mg, `:"("}${m.frequency.toLowerCase()})${m.reason?` for ${m.reason}`:""}`); med.push(`${name} is currently prescribed: ${ml.join("; ")}. `); if(v.nextMedMgmtDate||v.nextMedMgmtProvider) med.push(`Next medication management appointment: ${fmtDate(v.nextMedMgmtDate)}${v.nextMedMgmtProvider?` with ${v.nextMedMgmtProvider}`:""}. `); }
+  else med.push(`No psychotropic medications reported for ${name} at this time. `);
+  if(med.length) parts.push(`HEALTH AND MEDICAL INFORMATION\n\n${med.join("")}`);
+  const obs=[];
+  if(v.behavior||v.mood) obs.push(`During the visit, ${name} presented with ${[v.behavior,v.mood].filter(Boolean).join(" and ").toLowerCase()}. `);
+  if(v.appearance) obs.push(`In terms of physical appearance, ${name} appeared ${v.appearance}. `);
+  if(v.interaction) obs.push(`${name}'s interaction with others: ${v.interaction}. `);
+  if(v.communication) obs.push(`Communication was observed to be ${v.communication.toLowerCase()}. `);
+  if(v.strengths) obs.push(`Strengths observed: ${v.strengths}. `);
+  if(v.concerns) obs.push(`Concerns noted: ${v.concerns}. `);
+  if(v.childStatements) obs.push(`\n${name} stated: "${v.childStatements}"`);
+  if(obs.length) parts.push(`CHILD OBSERVATION\n\n${obs.join("")}`);
+  const env=[];
+  if(v.sleepingArea) env.push(`Sleeping Area: ${v.sleepingArea}`);
+  if(v.homeObs) env.push(`Home Environment: ${v.homeObs}`);
+  if(env.length) parts.push(`HOME ENVIRONMENT OBSERVATION\n\n${env.join("\n\n")}`);
+  if(v.caregiver) parts.push(`CAREGIVER CONVERSATION\n\nThe Guardian Ad Litem conducted a private conversation with the caregiver. The following was noted: ${v.caregiver}`);
+  if(v.wishesConfirmed||v.wishes){ const wi=v.wishesConfirmed?`The Guardian Ad Litem directly asked ${name} about their wishes and wants during this visit. `:`The following wishes and wants were noted. `; parts.push(`CHILD'S EXPRESSED WISHES AND WANTS\n\n${wi}${v.wishes?`${name} expressed: ${v.wishes}`:""}`); }
+  const edu=[];
+  if(v.schoolName) edu.push(`${name} is currently enrolled at ${v.schoolName}${v.gradeLevel?`, ${v.gradeLevel}`:""}. `);
+  if(v.academicProgress) edu.push(`Academic progress: ${v.academicProgress.toLowerCase()}. `);
+  const plans=[v.hasIEP&&"an IEP",v.hasPlan504&&"a 504 Plan"].filter(Boolean);
+  if(plans.length) edu.push(`${name} has ${plans.join(" and ")} in place. `);
+  if(v.servicesReceiving) edu.push(`Services receiving: ${v.servicesReceiving}. `);
+  if(v.addlNeeds) edu.push(`Additional needs: ${v.addlNeeds}. `);
+  if(edu.length) parts.push(`EDUCATION\n\n${edu.join("")}`);
+  const vis=[];
+  if(v.parentStatus) vis.push(`Parent visitation is currently ${v.parentStatus.toLowerCase()}. `);
+  if(v.parentFreq) vis.push(`Visits are occurring ${v.parentFreq.toLowerCase()}. `);
+  if(v.parentQuality&&v.parentQuality!=="N/A") vis.push(`Quality of parent visitation: ${v.parentQuality.toLowerCase()}. `);
+  if(v.parentConcerns) vis.push(`Parent visit concerns: ${v.parentConcerns}. `);
+  if(v.siblingStatus&&v.siblingStatus!=="N/A") vis.push(`Sibling visitation status: ${v.siblingStatus.toLowerCase()}. `);
+  if(v.siblingNotes) vis.push(`${v.siblingNotes}. `);
+  if(vis.length) parts.push(`VISITATION\n\n${vis.join("")}`);
+  if(v.galFollowUp) parts.push(`GAL FOLLOW-UP NEEDED\n\nThe following action items are required: ${v.galFollowUp}`);
+  if(v.additionalNotes) parts.push(`ADDITIONAL NOTES\n\n${v.additionalNotes}`);
+  parts.push(`${dash}\nReport prepared by Guardian Ad Litem Volunteer, Walter F. Edwards\nDate of Report: ${new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"})}`);
+  return parts.join("\n\n");
+}
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const C = {bg:"#F7F5F0",card:"#fff",navy:"#1B2E4B",teal:"#2A7D6B",accent:"#C4822A",border:"#DDD8CF",muted:"#8A8279",text:"#2A2620",danger:"#B33A3A",success:"#2A7D4F",ibg:"#FAFAF8"};
+const baseInp = {width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,background:C.ibg,color:C.text,fontSize:14,fontFamily:"Georgia,serif",outline:"none",boxSizing:"border-box"};
+const baseLbl = {fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:C.muted,marginBottom:4,display:"block",fontFamily:"Trebuchet MS,sans-serif"};
+
+// ── Primitive UI ──────────────────────────────────────────────────────────────
+const Lbl = ({t}) => <label style={baseLbl}>{t}</label>;
+const F   = ({label,children}) => <div style={{marginBottom:11}}><Lbl t={label}/>{children}</div>;
+const R2  = ({children}) => <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>{children}</div>;
+const TI  = ({v,s,ph,type="text"}) => <input type={type} value={v} onChange={e=>s(e.target.value)} placeholder={ph||""} style={baseInp}/>;
+const TA  = ({v,s,ph,rows=2}) => <textarea value={v} onChange={e=>s(e.target.value)} placeholder={ph||""} rows={rows} style={{...baseInp,resize:"vertical",lineHeight:1.6}}/>;
+const SE  = ({v,s,opts}) => <select value={v} onChange={e=>s(e.target.value)} style={{...baseInp,cursor:"pointer"}}>{opts.map(o=><option key={o} value={o}>{o}</option>)}</select>;
+
+function Sec({icon,title,children}) {
+  return (
+    <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"14px 16px",marginBottom:12,boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+      <div style={{fontSize:11,fontWeight:700,letterSpacing:1.2,textTransform:"uppercase",color:C.navy,marginBottom:12,display:"flex",alignItems:"center",gap:6,fontFamily:"Trebuchet MS,sans-serif",borderBottom:`2px solid ${C.teal}`,paddingBottom:6}}>{icon} {title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Tog({label,v,s}) {
+  return (
+    <div onClick={()=>s(!v)} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none",marginBottom:10}}>
+      <div style={{width:42,height:24,borderRadius:12,background:v?C.teal:C.border,position:"relative",transition:"background .2s",flexShrink:0}}>
+        <div style={{position:"absolute",top:3,left:v?21:3,width:18,height:18,borderRadius:9,background:"#fff",transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.2)"}}/>
+      </div>
+      <span style={{fontSize:13,color:C.text,fontFamily:"Georgia,serif"}}>{label}</span>
+    </div>
+  );
+}
+
+function Chips({field,val,set}) {
+  const terms = OBS_TERMS[field]||[];
+  const add = t => { if(val&&val.toLowerCase().includes(t.toLowerCase())) return; set(val?val+", "+t:t); };
+  return (
+    <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:6}}>
+      {terms.map(t=>{ const on=val&&val.toLowerCase().includes(t.toLowerCase()); return (
+        <button key={t} onClick={()=>add(t)} style={{padding:"4px 9px",borderRadius:20,border:`1.5px solid ${on?C.teal:C.border}`,background:on?C.teal+"18":C.ibg,color:on?C.teal:C.muted,fontSize:11,fontWeight:on?700:500,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>{on?"✓ ":""}{t}</button>
+      );})}
+    </div>
+  );
+}
+
+function OF({label,field,val,set}) {
+  return (
+    <div style={{marginBottom:11}}>
+      <Lbl t={label}/>
+      <Chips field={field} val={val} set={set}/>
+      <TA v={val} s={set} ph="Tap terms above or type notes..."/>
+    </div>
+  );
+}
+
+function SaveBtn({onClick}) {
+  const [msg,setMsg] = useState("");
+  const handle = () => {
+    const ok = onClick();
+    setMsg(ok?"✓ Saved!":"⚠️ Save failed");
+    setTimeout(()=>setMsg(""),2500);
+  };
+  return (
+    <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:10,marginTop:8}}>
+      {msg && <span style={{fontSize:12,color:msg.startsWith("✓")?C.success:C.danger,fontFamily:"Trebuchet MS,sans-serif",fontWeight:700}}>{msg}</span>}
+      <button onClick={handle} style={{padding:"10px 24px",borderRadius:9,border:"none",background:C.teal,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>💾 Save Visit</button>
+    </div>
+  );
+}
+
+function DelBtn({onDelete}) {
+  const [c,setC] = useState(false);
+  if(c) return <div style={{display:"flex",gap:6}}>
+    <button onClick={onDelete} style={{padding:"6px 10px",borderRadius:7,border:"none",background:C.danger,color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>Delete</button>
+    <button onClick={()=>setC(false)} style={{padding:"6px 10px",borderRadius:7,border:"none",background:"#999",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>Cancel</button>
+  </div>;
+  return <button onClick={()=>setC(true)} style={{background:"none",border:"none",color:C.muted,fontSize:20,cursor:"pointer",padding:"4px 8px",lineHeight:1}}>🗑</button>;
+}
+
+// ── Tab panels ────────────────────────────────────────────────────────────────
+function TabCore({v,s}) { return <>
+  <Sec icon="📋" title="Visit Details">
+    <R2><F label="Date of Visit"><TI type="date" v={v.date} s={x=>s("date",x)}/></F><F label="Time of Visit"><TI type="time" v={v.time} s={x=>s("time",x)}/></F></R2>
+    <R2><F label="Child Name"><TI v={v.childName} s={x=>s("childName",x)} ph="First Last"/></F><F label="Case Number"><TI v={v.caseNumber} s={x=>s("caseNumber",x)} ph="2024-JV-00123"/></F></R2>
+    <R2><F label="Placement Type"><SE v={v.placementType} s={x=>s("placementType",x)} opts={PLACEMENTS}/></F><F label="Type of Visit"><SE v={v.visitType} s={x=>s("visitType",x)} opts={VISIT_TYPES}/></F></R2>
+    <F label="Address of Visit"><TI v={v.visitAddress} s={x=>s("visitAddress",x)} ph="Street address of visit"/></F>
+    <F label="People Present"><TA v={v.peoplePresent} s={x=>s("peoplePresent",x)} ph="Names and relationship to child..."/></F>
+  </Sec>
+</>; }
+
+function TabMedical({v,s}) { return <>
+  <Sec icon="🩺" title="Medical Appointments">
+    <R2><F label="Last Medical Appt"><TI type="date" v={v.lastMedDate} s={x=>s("lastMedDate",x)}/></F><F label="Provider"><TI v={v.lastMedProvider} s={x=>s("lastMedProvider",x)} ph="Dr. Smith"/></F></R2>
+    <R2><F label="Next Medical Appt"><TI type="date" v={v.nextMedDate} s={x=>s("nextMedDate",x)}/></F><F label="Provider"><TI v={v.nextMedProvider} s={x=>s("nextMedProvider",x)} ph="Dr. Smith"/></F></R2>
+  </Sec>
+  <Sec icon="🦷" title="Dental Appointments">
+    <R2><F label="Last Dental Appt"><TI type="date" v={v.lastDentDate} s={x=>s("lastDentDate",x)}/></F><F label="Provider"><TI v={v.lastDentProvider} s={x=>s("lastDentProvider",x)} ph="Dr. Jones"/></F></R2>
+    <R2><F label="Next Dental Appt"><TI type="date" v={v.nextDentDate} s={x=>s("nextDentDate",x)}/></F><F label="Provider"><TI v={v.nextDentProvider} s={x=>s("nextDentProvider",x)} ph="Dr. Jones"/></F></R2>
+  </Sec>
+  <Sec icon="💊" title="Vision & Medications">
+    <F label="Vision Needs"><TI v={v.visionNeeds} s={x=>s("visionNeeds",x)} ph="Glasses, contacts, none..."/></F>
+    <Tog label="Child prescribed psychotropic medication" v={v.hasPsychMed} s={x=>s("hasPsychMed",x)}/>
+    {v.hasPsychMed && <>
+      {v.medications.map((m,i)=>(
+        <div key={i} style={{background:C.bg,borderRadius:10,border:`1px solid ${C.border}`,padding:"12px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <span style={{fontSize:11,fontWeight:700,color:C.navy,fontFamily:"Trebuchet MS,sans-serif",textTransform:"uppercase"}}>Medication {i+1}</span>
+            <button onClick={()=>{const ms=[...v.medications];ms.splice(i,1);s("medications",ms);}} style={{background:"none",border:"none",color:C.danger,fontSize:20,cursor:"pointer",lineHeight:1}}>×</button>
+          </div>
+          <R2>
+            <F label="Name"><TI v={m.name} s={x=>{const ms=[...v.medications];ms[i]={...ms[i],name:x};s("medications",ms);}} ph="Risperidone"/></F>
+            <F label="Dosage (mg)"><TI v={m.dosage} s={x=>{const ms=[...v.medications];ms[i]={...ms[i],dosage:x};s("medications",ms);}} ph="0.5"/></F>
+          </R2>
+          <R2>
+            <F label="Frequency"><SE v={m.frequency} s={x=>{const ms=[...v.medications];ms[i]={...ms[i],frequency:x};s("medications",ms);}} opts={FREQS}/></F>
+            <F label="Reason"><TI v={m.reason} s={x=>{const ms=[...v.medications];ms[i]={...ms[i],reason:x};s("medications",ms);}} ph="ADHD, anxiety"/></F>
+          </R2>
+        </div>
+      ))}
+      <button onClick={()=>s("medications",[...v.medications,{name:"",dosage:"",frequency:"Once Daily",reason:""}])} style={{width:"100%",padding:"10px",borderRadius:9,border:"none",background:C.teal,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif",marginBottom:10}}>+ Add Medication</button>
+      <R2><F label="Next Med Mgmt Appt"><TI type="date" v={v.nextMedMgmtDate} s={x=>s("nextMedMgmtDate",x)}/></F><F label="Provider"><TI v={v.nextMedMgmtProvider} s={x=>s("nextMedMgmtProvider",x)} ph="Dr. Patel"/></F></R2>
+    </>}
+  </Sec>
+</>; }
+
+function TabObs({v,s}) { return <>
+  <Sec icon="🔍" title="Child Observation">
+    <p style={{fontSize:11,color:C.muted,marginBottom:12,fontFamily:"Trebuchet MS,sans-serif"}}>Tap a term to add it, or type freely below each field.</p>
+    <OF label="Behavior" field="behavior" val={v.behavior} set={x=>s("behavior",x)}/>
+    <OF label="Mood" field="mood" val={v.mood} set={x=>s("mood",x)}/>
+    <OF label="Interaction with Others" field="interaction" val={v.interaction} set={x=>s("interaction",x)}/>
+    <OF label="Communication" field="communication" val={v.communication} set={x=>s("communication",x)}/>
+    <OF label="Physical Appearance" field="appearance" val={v.appearance} set={x=>s("appearance",x)}/>
+    <OF label="Concerns Observed" field="concerns" val={v.concerns} set={x=>s("concerns",x)}/>
+    <OF label="Strengths Observed" field="strengths" val={v.strengths} set={x=>s("strengths",x)}/>
+    <F label="Statements Made by Child"><TA v={v.childStatements} s={x=>s("childStatements",x)} ph="Direct quotes or paraphrased statements..." rows={3}/></F>
+  </Sec>
+  <Sec icon="🛏" title="Sleeping Area"><OF label="Sleeping Area Observations" field="sleepingArea" val={v.sleepingArea} set={x=>s("sleepingArea",x)}/></Sec>
+  <Sec icon="🏠" title="Home Environment"><OF label="Home Environment Observations" field="homeObs" val={v.homeObs} set={x=>s("homeObs",x)}/></Sec>
+  <Sec icon="💬" title="Caregiver Conversation"><OF label="Caregiver Notes (Confidential)" field="caregiver" val={v.caregiver} set={x=>s("caregiver",x)}/></Sec>
+</>; }
+
+function TabEducation({v,s}) { return (
+  <Sec icon="🎓" title="School / Daycare">
+    <R2><F label="School / Daycare Name"><TI v={v.schoolName} s={x=>s("schoolName",x)} ph="School name"/></F><F label="Grade Level"><TI v={v.gradeLevel} s={x=>s("gradeLevel",x)} ph="3rd Grade"/></F></R2>
+    <F label="Academic Progress"><SE v={v.academicProgress} s={x=>s("academicProgress",x)} opts={ACADEMIC}/></F>
+    <div style={{display:"flex",gap:20,marginBottom:10}}><Tog label="IEP in Place" v={v.hasIEP} s={x=>s("hasIEP",x)}/><Tog label="504 Plan" v={v.hasPlan504} s={x=>s("hasPlan504",x)}/></div>
+    <F label="Services Currently Receiving"><TA v={v.servicesReceiving} s={x=>s("servicesReceiving",x)} ph="Speech therapy, tutoring, counseling..."/></F>
+    <F label="Additional Needs & Recommendations"><TA v={v.addlNeeds} s={x=>s("addlNeeds",x)} ph="Gaps identified, referrals needed..."/></F>
+  </Sec>
+); }
+
+function TabVisitation({v,s}) { return <>
+  <Sec icon="👨‍👩‍👧" title="Parent Visitation">
+    <R2><F label="Status"><SE v={v.parentStatus} s={x=>s("parentStatus",x)} opts={V_STATUS}/></F><F label="Quality"><SE v={v.parentQuality} s={x=>s("parentQuality",x)} opts={QUAL}/></F></R2>
+    <F label="Frequency"><TI v={v.parentFreq} s={x=>s("parentFreq",x)} ph="Weekly, bi-weekly..."/></F>
+    <F label="Concerns"><TA v={v.parentConcerns} s={x=>s("parentConcerns",x)} ph="Any concerns about parent visitation..."/></F>
+  </Sec>
+  <Sec icon="👫" title="Sibling Visitation">
+    <F label="Status"><SE v={v.siblingStatus} s={x=>s("siblingStatus",x)} opts={V_STATUS}/></F>
+    <F label="Sibling Visitation Notes"><TA v={v.siblingNotes} s={x=>s("siblingNotes",x)} ph="Frequency, quality, concerns..."/></F>
+  </Sec>
+</>; }
+
+function TabGAL({v,s}) { return (
+  <Sec icon="⚖️" title="GAL Action Items">
+    <div style={{background:v.wishesConfirmed?"#F0FAF5":"#FFF8F0",border:`2px solid ${v.wishesConfirmed?C.teal:C.accent}`,borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:700,textTransform:"uppercase",letterSpacing:.8,color:v.wishesConfirmed?C.teal:C.accent,fontFamily:"Trebuchet MS,sans-serif",marginBottom:10,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        💬 Child's Wishes & Wants
+        <span style={{background:v.wishesConfirmed?C.teal:C.accent,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:700}}>{v.wishesConfirmed?"✓ CONFIRMED":"REQUIRED"}</span>
+      </div>
+      <label style={{display:"flex",alignItems:"flex-start",gap:12,background:v.wishesConfirmed?"#D8F3E8":"#FEF0DC",border:`1.5px solid ${v.wishesConfirmed?"#A8DFC4":"#F0C88A"}`,borderRadius:10,padding:"12px 14px",marginBottom:12,cursor:"pointer"}}>
+        <input type="checkbox" checked={v.wishesConfirmed} onChange={e=>s("wishesConfirmed",e.target.checked)} style={{width:20,height:20,marginTop:2,accentColor:C.teal,flexShrink:0}}/>
+        <span style={{fontSize:13,fontWeight:600,color:v.wishesConfirmed?C.teal:C.accent,lineHeight:1.5,fontFamily:"Georgia,serif"}}>I confirm the child was directly asked about their wishes and wants and given the opportunity to express their preferences, concerns, and desires.</span>
+      </label>
+      <OF label="Child's Wishes and Wants" field="wishes" val={v.wishes} set={x=>s("wishes",x)}/>
+    </div>
+    <F label="GAL Follow-Up Needed"><TA v={v.galFollowUp} s={x=>s("galFollowUp",x)} ph="Action items, referrals, follow-up tasks..." rows={3}/></F>
+    <F label="Additional Notes"><TA v={v.additionalNotes} s={x=>s("additionalNotes",x)} ph="Any additional observations or notes..." rows={3}/></F>
+  </Sec>
+); }
+
+function TabNarrative({v,s,onSave}) {
+  const [text,setText] = useState(v.narrative||"");
+  const [copied,setCopied] = useState(false);
+  const taRef = useRef(null);
+  const generate = () => { const t=buildNarrative(v); setText(t); s("narrative",t); };
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); }
+    catch { if(taRef.current){taRef.current.select();document.execCommand("copy");} }
+    setCopied(true); setTimeout(()=>setCopied(false),2500);
+  };
+  return (
+    <Sec icon="📄" title="Visit Narrative">
+      <p style={{fontSize:12,color:C.muted,marginBottom:12,lineHeight:1.6,fontFamily:"Trebuchet MS,sans-serif"}}>Generate a narrative from all visit data. Edit as needed, then copy into Word or Apple Pages.</p>
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        <button onClick={generate} style={{padding:"9px 16px",borderRadius:9,border:"none",background:C.navy,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>⚡ Generate</button>
+        {text && <button onClick={copy} style={{padding:"9px 16px",borderRadius:9,border:"none",background:copied?C.success:C.teal,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>{copied?"✓ Copied!":"📋 Copy"}</button>}
+        {text && <button onClick={onSave} style={{padding:"9px 16px",borderRadius:9,border:"none",background:C.accent,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>💾 Save</button>}
+      </div>
+      {text
+        ? <textarea ref={taRef} value={text} onChange={e=>{setText(e.target.value);s("narrative",e.target.value);}} style={{...baseInp,fontFamily:"Courier New,monospace",fontSize:12,lineHeight:1.6,minHeight:400,resize:"vertical"}}/>
+        : <div style={{textAlign:"center",padding:"40px 20px",color:C.muted}}><div style={{fontSize:40,marginBottom:10}}>📝</div><div style={{fontSize:13}}>Tap Generate to create your report.</div></div>
+      }
+    </Sec>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const [visits,  setVisits]  = useState(() => lsRead());
+  const [view,    setView]    = useState("list");
+  const [current, setCurrent] = useState(null);
+  const [tab,     setTab]     = useState("core");
+  const [search,  setSearch]  = useState("");
+
+  // Save helper — synchronous localStorage, returns true/false
+  const persist = (newVisits) => {
+    return lsWrite(newVisits);
+  };
+
+  const sf = (k,val) => setCurrent(c => ({...c, [k]:val}));
+
+  const saveVisit = () => {
+    const updated = visits.some(v=>v.id===current.id)
+      ? visits.map(v => v.id===current.id ? {...current} : v)
+      : [{...current}, ...visits];
+    setVisits(updated);
+    return persist(updated);
+  };
+
+  const deleteVisit = (id) => {
+    const updated = visits.filter(v=>v.id!==id);
+    setVisits(updated);
+    persist(updated);
+  };
+
+  const filtered = visits.filter(v =>
+    !search ||
+    v.childName.toLowerCase().includes(search.toLowerCase()) ||
+    v.caseNumber.toLowerCase().includes(search.toLowerCase())
+  );
+
+  // ── Header ──
+  const Header = () => (
+    <div style={{background:C.navy,padding:"11px 16px",position:"sticky",top:0,zIndex:50,boxShadow:"0 2px 12px rgba(0,0,0,.2)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <div>
+        <div style={{fontSize:9,color:"#8BA4CC",letterSpacing:1.6,textTransform:"uppercase",fontFamily:"Trebuchet MS,sans-serif"}}>Guardian Ad Litem</div>
+        <div style={{fontSize:17,fontWeight:700,color:"#EDF3FF"}}>{view==="list"?"Visit Records":current?.childName||"New Visit"}</div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        {view==="form" && <>
+          <button onClick={()=>{setView("list");}} style={{padding:"8px 14px",borderRadius:8,border:"1.5px solid rgba(255,255,255,.3)",background:"transparent",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>← Back</button>
+        </>}
+        {view==="list" && (
+          <button onClick={()=>{setCurrent(newVisit());setTab("core");setView("form");}} style={{padding:"8px 16px",borderRadius:8,border:"none",background:C.teal,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"Trebuchet MS,sans-serif"}}>+ New Visit</button>
+        )}
+      </div>
+    </div>
+  );
+
+  // ── List View ──
+  if(view==="list") return (
+    <div style={{minHeight:"100vh",background:C.bg}}>
+      <Header/>
+      <div style={{padding:"12px 16px"}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
+          {[
+            {icon:"📋",val:visits.length,lbl:"Total Visits"},
+            {icon:"👦",val:new Set(visits.map(v=>v.caseNumber).filter(Boolean)).size,lbl:"Cases"},
+            {icon:"📅",val:visits.filter(v=>{const n=new Date(),d=new Date(v.date);return d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear();}).length,lbl:"This Month"},
+          ].map(st=>(
+            <div key={st.lbl} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
+              <div style={{fontSize:18}}>{st.icon}</div>
+              <div style={{fontSize:18,fontWeight:700,color:C.navy}}>{st.val}</div>
+              <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.6,fontFamily:"Trebuchet MS,sans-serif"}}>{st.lbl}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{position:"relative",marginBottom:12}}>
+          <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,pointerEvents:"none"}}>🔍</span>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name or case number..." style={{...baseInp,paddingLeft:36}}/>
+        </div>
+        {filtered.length===0
+          ? <div style={{textAlign:"center",padding:"60px 20px",color:C.muted}}>
+              <div style={{fontSize:48,marginBottom:12}}>📋</div>
+              <div style={{fontSize:15,fontWeight:600,color:C.navy,marginBottom:6}}>{visits.length===0?"No visits recorded yet":"No matching records"}</div>
+              <div style={{fontSize:13}}>{visits.length===0?"Tap '+ New Visit' to begin.":"Try a different search."}</div>
+            </div>
+          : filtered.map(v=>(
+              <div key={v.id} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 13px",display:"flex",alignItems:"center",gap:12,borderLeft:`3px solid ${C.teal}`,boxShadow:"0 1px 3px rgba(0,0,0,.04)",marginBottom:10}}>
+                <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>{setCurrent({...v});setTab("core");setView("form");}}>
+                  <div style={{fontSize:15,fontWeight:700,color:C.navy,marginBottom:2}}>{v.childName||"Unnamed Child"}</div>
+                  <div style={{fontSize:12,color:C.muted,fontFamily:"Trebuchet MS,sans-serif"}}>Case #{v.caseNumber||"N/A"} · {fmtDate(v.date)} {fmtTime(v.time)}</div>
+                  <div style={{fontSize:11,color:C.teal,fontWeight:600,marginTop:2,fontFamily:"Trebuchet MS,sans-serif",textTransform:"uppercase",letterSpacing:.5}}>{v.placementType} · {v.visitType}</div>
+                </div>
+                <DelBtn onDelete={()=>deleteVisit(v.id)}/>
+              </div>
+            ))
+        }
+      </div>
+    </div>
+  );
+
+  // ── Form View ──
+  const panels = {
+    core:       <TabCore       v={current} s={sf}/>,
+    medical:    <TabMedical    v={current} s={sf}/>,
+    obs:        <TabObs        v={current} s={sf}/>,
+    education:  <TabEducation  v={current} s={sf}/>,
+    visitation: <TabVisitation v={current} s={sf}/>,
+    gal:        <TabGAL        v={current} s={sf}/>,
+    narrative:  <TabNarrative  v={current} s={sf} onSave={saveVisit}/>,
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg}}>
+      <Header/>
+      <div style={{overflowX:"auto",background:C.card,borderBottom:`1px solid ${C.border}`,padding:"6px 10px",display:"flex",gap:4,WebkitOverflowScrolling:"touch"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"7px 12px",border:"none",background:tab===t.id?C.navy:"transparent",color:tab===t.id?"#fff":C.muted,borderRadius:7,fontSize:11,fontWeight:700,letterSpacing:.6,textTransform:"uppercase",fontFamily:"Trebuchet MS,sans-serif",whiteSpace:"nowrap",cursor:"pointer"}}>{t.label}</button>
+        ))}
+      </div>
+      <div style={{padding:"12px 16px"}}>
+        {panels[tab]}
+        {tab!=="narrative" && <SaveBtn onClick={saveVisit}/>}
+      </div>
+    </div>
+  );
+}
